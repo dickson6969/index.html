@@ -210,9 +210,9 @@
                         <img src="https://www.google.com/favicon.ico" class="w-4 h-4"> 連結 Google 帳號
                     </button>
                     <button id="sync_button" onclick="syncAllToSheet()" class="hidden btn-primary text-xs py-2 bg-orange-400 shadow-none border-none hover:bg-orange-500">
-                        同步數據至雲端
+                        立即同步數據至試算表
                     </button>
-                    <button id="signout_button" onclick="handleSignoutClick()" class="hidden text-[10px] text-gray-400 underline mt-1">登出</button>
+                    <button id="signout_button" onclick="handleSignoutClick()" class="hidden text-[10px] text-gray-400 underline mt-1">登出並清除連接</button>
                 </div>
             </div>
 
@@ -266,35 +266,31 @@
 
         // --- Google API 邏輯 ---
         function gapiLoaded() {
-            if (typeof gapi !== 'undefined') {
-                gapi.load('client', intializeGapiClient);
-            }
+            gapi.load('client', intializeGapiClient);
         }
         
         async function intializeGapiClient() {
             try {
                 await gapi.client.init({ apiKey: API_KEY, discoveryDocs: [DISCOVERY_DOC] });
                 gapiInited = true;
-                checkBeforeStart();
+                maybeEnableButtons();
             } catch (err) { console.error("GAPI 初始化錯誤:", err); }
         }
         
         function gisLoaded() {
-            if (typeof google !== 'undefined' && google.accounts) {
-                tokenClient = google.accounts.oauth2.initTokenClient({
-                    client_id: CLIENT_ID, 
-                    scope: SCOPES, 
-                    callback: '', 
-                });
-                gisInited = true;
-                checkBeforeStart();
-            }
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID, 
+                scope: SCOPES, 
+                callback: '', // 在呼叫時動態定義
+            });
+            gisInited = true;
+            maybeEnableButtons();
         }
         
-        function checkBeforeStart() {
-            if (gapiInited && gisInited && localStorage.getItem('google_access_token')) {
+        function maybeEnableButtons() {
+            if (gapiInited && gisInited) {
                 const token = JSON.parse(localStorage.getItem('google_access_token'));
-                if (token && gapi.client) {
+                if (token) {
                     gapi.client.setToken(token);
                     updateSigninStatus(true);
                 }
@@ -302,14 +298,26 @@
         }
 
         function handleAuthClick() {
-            if (!tokenClient) return;
             tokenClient.callback = async (resp) => {
-                if (resp.error !== undefined) throw (resp);
+                if (resp.error !== undefined) {
+                    console.error("Auth Error:", resp);
+                    return;
+                }
                 localStorage.setItem('google_access_token', JSON.stringify(gapi.client.getToken()));
                 updateSigninStatus(true);
-                await initializeSpreadsheet();
+                // 登入後嘗試初始化或驗證試算表
+                try {
+                    await initializeSpreadsheet();
+                } catch (e) {
+                    console.error("初始化試算表失敗", e);
+                }
             };
-            tokenClient.requestAccessToken({prompt: gapi.client.getToken() === null ? 'consent' : ''});
+            
+            if (gapi.client.getToken() === null) {
+                tokenClient.requestAccessToken({prompt: 'consent'});
+            } else {
+                tokenClient.requestAccessToken({prompt: ''});
+            }
         }
 
         function handleSignoutClick() {
@@ -334,7 +342,7 @@
                 authBtn?.classList.add('hidden');
                 signoutBtn?.classList.remove('hidden');
                 syncBtn?.classList.remove('hidden');
-                if (status) status.innerText = "✅ 貓爪已連線到試算表";
+                if (status) status.innerText = "✅ 貓爪已連線到雲端";
             } else {
                 authBtn?.classList.remove('hidden');
                 signoutBtn?.classList.add('hidden');
@@ -344,60 +352,69 @@
         }
 
         async function initializeSpreadsheet() {
-            // 檢查是否真的需要初始化，如果已經有 ID 且有效，就不重複建立
+            // 如果已有 ID，嘗試獲取它以驗證權限和存在性
             if (spreadsheetId) {
                 try {
                     await gapi.client.sheets.spreadsheets.get({ spreadsheetId: spreadsheetId });
-                    return;
+                    return spreadsheetId;
                 } catch (e) {
-                    console.log("舊的試算表 ID 失效，重新建立...");
+                    console.warn("試算表 ID 失效或無權限，重新建立...", e);
                 }
             }
 
             try {
                 const response = await gapi.client.sheets.spreadsheets.create({
-                    resource: { properties: { title: '貓之帳本_我的雲端紀錄' } }
+                    resource: { properties: { title: '貓之帳本_雲端同步備份' } }
                 });
                 spreadsheetId = response.result.spreadsheetId;
                 localStorage.setItem('ghibli_spreadsheet_id', spreadsheetId);
+                
+                // 寫入標題行
                 await gapi.client.sheets.spreadsheets.values.update({
                     spreadsheetId: spreadsheetId,
                     range: 'Sheet1!A1:D1',
                     valueInputOption: 'RAW',
                     resource: { values: [['日期', '項目', '預算', '花費']] }
                 });
+                return spreadsheetId;
             } catch (err) { 
-                console.error("試算表建立失敗:", err); 
+                console.error("無法建立試算表:", err); 
+                if (err.status === 403) {
+                    alert("權限不足！請點擊登出後重新連結帳號，並確保勾選「查看及編輯試算表」權限。");
+                }
                 throw err;
             }
         }
 
         async function syncAllToSheet() {
             const btn = document.getElementById('sync_button');
-            if (!gapi.client.getToken()) {
-                btn.innerText = "請先登入";
+            const token = gapi.client.getToken();
+            
+            if (!token) {
+                btn.innerText = "請重新連結帳號";
                 return;
             }
 
             const originalText = btn.innerText;
-            btn.innerText = "正在搬運數據...";
+            btn.innerText = "🐾 搬運中...";
             btn.disabled = true;
 
             try {
-                // 確保試算表 ID 存在
+                // 1. 確保試算表就緒
                 await initializeSpreadsheet();
 
+                // 2. 準備數據
                 const values = entries.map(e => [e.date, e.category, e.budget, e.expense]);
                 
-                // 清除舊資料（從 A2 開始）
+                // 3. 清除舊數據（A2 以下）
                 await gapi.client.sheets.spreadsheets.values.clear({ 
                     spreadsheetId: spreadsheetId, 
                     range: 'Sheet1!A2:D1000' 
                 });
 
-                // 如果有新資料，則寫入
+                // 4. 寫入新數據
                 if (values.length > 0) {
-                    await gapi.client.sheets.spreadsheets.values.append({
+                    await gapi.client.sheets.spreadsheets.values.update({
                         spreadsheetId: spreadsheetId,
                         range: 'Sheet1!A2',
                         valueInputOption: 'RAW',
@@ -405,19 +422,23 @@
                     });
                 }
                 
-                btn.innerText = "搬運成功！🐾";
+                btn.innerText = "同步成功！✨";
+                btn.classList.replace('bg-orange-400', 'bg-green-500');
+                
                 setTimeout(() => { 
                     btn.innerText = originalText;
                     btn.disabled = false;
+                    btn.classList.replace('bg-green-500', 'bg-orange-400');
                 }, 2000);
 
             } catch (err) { 
-                console.error("同步錯誤詳情:", err);
-                let errorMsg = "搬運失敗";
-                if (err.status === 403) errorMsg = "權限不足(403)";
-                if (err.status === 404) errorMsg = "找不到檔案(404)";
+                console.error("同步失敗原因:", err);
+                let msg = "同步失敗";
+                if (err.status === 401) msg = "認證失效，請重新登入";
+                if (err.status === 403) msg = "權限不足，需重新授權";
+                if (err.status === 404) msg = "找不到試算表";
                 
-                btn.innerText = errorMsg;
+                btn.innerText = msg;
                 setTimeout(() => { 
                     btn.innerText = originalText;
                     btn.disabled = false;
@@ -455,7 +476,7 @@
             if (show) {
                 modal.classList.remove('hidden');
                 renderCategoryList();
-                if (gapiInited && gapi.client && gapi.client.getToken()) updateSigninStatus(true);
+                maybeEnableButtons();
             } else {
                 modal.classList.add('hidden');
                 updateCategorySelect();
