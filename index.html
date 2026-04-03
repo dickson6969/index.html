@@ -6,9 +6,6 @@
     <title>貓之帳本 - 喵嗚記帳</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
-    <!-- Google API Libraries -->
-    <script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
-    <script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
     <style>
         :root {
             --cat-orange: #ffb347;
@@ -69,7 +66,9 @@
             gap: 10px;
             width: 100%;
             cursor: pointer;
+            transition: all 0.2s;
         }
+        .btn-google:active { transform: scale(0.98); background-color: #f8f8f8; }
 
         .input-field {
             border: 2px solid var(--cat-pink);
@@ -161,7 +160,7 @@
                 <p id="googleStatus" class="text-[10px] text-orange-600 mb-3 italic">正在準備同步工具...</p>
                 <div class="flex flex-col gap-2">
                     <button id="authorize_button" onclick="handleAuthClick()" class="btn-google">
-                        <img src="https://www.google.com/favicon.ico" class="w-4 h-4"> 連結 Google 帳號
+                        <img src="https://www.google.com/favicon.ico" class="w-4 h-4"> 點此嘗試連結 Google
                     </button>
                     <button id="sync_button" onclick="syncAllToSheet()" class="hidden btn-primary text-xs py-2">
                         立即同步數據至試算表
@@ -199,54 +198,85 @@
         let budgetSettings = JSON.parse(localStorage.getItem('ghibli_budgets')) || defaultBudgets;
         let entries = JSON.parse(localStorage.getItem('ghibli_entries')) || [];
 
+        // GAPI 初始化
         function gapiLoaded() {
+            console.log("GAPI 腳本已加載，正在初始化...");
             gapi.load('client', async () => {
-                await gapi.client.init({ apiKey: API_KEY, discoveryDocs: [DISCOVERY_DOC] });
-                gapiInited = true;
-                checkReady();
+                try {
+                    await gapi.client.init({ apiKey: API_KEY, discoveryDocs: [DISCOVERY_DOC] });
+                    gapiInited = true;
+                    console.log("GAPI 成功初始化");
+                    checkReady();
+                } catch (e) {
+                    console.error("GAPI 初始化出錯:", e);
+                }
             });
         }
 
+        // GIS 初始化
         function gisLoaded() {
+            console.log("GIS 腳本已加載，正在初始化...");
             try {
                 tokenClient = google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID,
                     scope: SCOPES,
                     callback: (resp) => handleTokenResponse(resp),
+                    error_callback: (err) => {
+                        console.error("GIS 錯誤回報:", err);
+                        alert("登入過程發生錯誤，請檢查瀏覽器設定。");
+                    }
                 });
                 gisInited = true;
+                console.log("GIS 成功初始化");
                 checkReady();
             } catch (e) {
-                console.error("GIS 初始化失敗:", e);
-                document.getElementById('googleStatus').innerText = "❌ 初始化失敗，請重整頁面";
+                console.error("GIS 初始化崩潰:", e);
+                const statusEl = document.getElementById('googleStatus');
+                if (statusEl) statusEl.innerText = "❌ 貓咪連線出錯，請重整頁面";
             }
         }
 
         function checkReady() {
             if (gapiInited && gisInited) {
-                document.getElementById('googleStatus').innerText = "✅ 同步工具已就緒";
+                const statusEl = document.getElementById('googleStatus');
+                if (statusEl) {
+                    statusEl.innerText = "✅ 貓咪已就緒，可以點擊按鈕連結";
+                    statusEl.classList.add('text-green-600');
+                }
+                
                 const savedToken = localStorage.getItem('google_access_token');
                 if (savedToken) {
-                    gapi.client.setToken(JSON.parse(savedToken));
-                    updateSigninStatus(true);
+                    try {
+                        gapi.client.setToken(JSON.parse(savedToken));
+                        updateSigninStatus(true);
+                    } catch(e) {
+                        localStorage.removeItem('google_access_token');
+                    }
                 }
             }
         }
 
         function handleAuthClick() {
+            console.log("嘗試發起認證請求...");
             if (!tokenClient) {
-                alert("貓咪還沒準備好，請稍等一秒再試一次！");
+                alert("正在努力準備中...請再等幾秒後重試！");
                 return;
             }
-            // 請求 Token，並確保彈出視窗
-            tokenClient.requestAccessToken({ prompt: 'consent' });
+            
+            try {
+                tokenClient.requestAccessToken({ prompt: 'consent' });
+            } catch (e) {
+                console.error("請求 Access Token 失敗:", e);
+                alert("無法開啟登入視窗，請確認是否被瀏覽器攔截彈窗。");
+            }
         }
 
         function handleTokenResponse(resp) {
             if (resp.error !== undefined) {
-                console.error("Auth Error:", resp);
+                console.error("Auth 回應錯誤:", resp);
                 return;
             }
+            console.log("登入成功，取得 Token");
             localStorage.setItem('google_access_token', JSON.stringify(gapi.client.getToken()));
             updateSigninStatus(true);
             initializeSpreadsheet();
@@ -265,10 +295,15 @@
         }
 
         function updateSigninStatus(isSignedIn) {
-            document.getElementById('authorize_button').classList.toggle('hidden', isSignedIn);
-            document.getElementById('signout_button').classList.toggle('hidden', !isSignedIn);
-            document.getElementById('sync_button').classList.toggle('hidden', !isSignedIn);
-            document.getElementById('googleStatus').innerText = isSignedIn ? "✅ 貓爪已連線到雲端" : "尚未連結 Google 帳號";
+            const authBtn = document.getElementById('authorize_button');
+            const signoutBtn = document.getElementById('signout_button');
+            const syncBtn = document.getElementById('sync_button');
+            const statusEl = document.getElementById('googleStatus');
+
+            if (authBtn) authBtn.classList.toggle('hidden', isSignedIn);
+            if (signoutBtn) signoutBtn.classList.toggle('hidden', !isSignedIn);
+            if (syncBtn) syncBtn.classList.toggle('hidden', !isSignedIn);
+            if (statusEl) statusEl.innerText = isSignedIn ? "✅ 雲端同步已開啟" : "尚未連結 Google 帳號";
         }
 
         async function initializeSpreadsheet() {
@@ -288,6 +323,7 @@
 
         async function syncAllToSheet() {
             const btn = document.getElementById('sync_button');
+            const originalText = btn.innerText;
             btn.disabled = true;
             btn.innerText = "🐾 搬運中...";
             try {
@@ -301,17 +337,17 @@
                     });
                 }
                 btn.innerText = "同步成功！✨";
-                setTimeout(() => { btn.innerText = "立即同步數據至試算表"; btn.disabled = false; }, 2000);
+                setTimeout(() => { btn.innerText = originalText; btn.disabled = false; }, 2000);
             } catch (err) {
                 console.error(err);
-                btn.innerText = "同步出錯，請重試";
+                btn.innerText = "同步出錯，請檢查權限";
                 btn.disabled = false;
             }
         }
 
-        // --- 核心邏輯 ---
         function updateCategorySelect() {
             const select = document.getElementById('categorySelect');
+            if (!select) return;
             select.innerHTML = '';
             Object.keys(budgetSettings).forEach(cat => {
                 const opt = document.createElement('option');
@@ -323,7 +359,10 @@
 
         function handleCategoryChange() {
             const select = document.getElementById('categorySelect');
-            document.getElementById('currentBudgetDisplay').value = budgetSettings[select.value] || 0;
+            const display = document.getElementById('currentBudgetDisplay');
+            if (select && display) {
+                display.value = budgetSettings[select.value] || 0;
+            }
         }
 
         function addEntry() {
@@ -340,6 +379,7 @@
 
         function renderEntries() {
             const container = document.getElementById('entriesContainer');
+            if (!container) return;
             container.innerHTML = '';
             let lastDate = '';
             entries.forEach(e => {
@@ -367,14 +407,16 @@
 
         function updateSummary() {
             const total = entries.reduce((s, e) => s + e.expense, 0);
-            document.getElementById('totalExpense').innerText = `$ ${total}`;
-            // 簡化計算
+            const totalExpEl = document.getElementById('totalExpense');
+            const totalRemEl = document.getElementById('totalRemaining');
+            if (totalExpEl) totalExpEl.innerText = `$ ${total}`;
             const totalBudget = Object.values(budgetSettings).reduce((s, b) => s + b, 0);
-            document.getElementById('totalRemaining').innerText = `$ ${totalBudget - total}`;
+            if (totalRemEl) totalRemEl.innerText = `$ ${totalBudget - total}`;
         }
 
         function toggleSettings(show) {
-            document.getElementById('settingsModal').classList.toggle('hidden', !show);
+            const modal = document.getElementById('settingsModal');
+            if (modal) modal.classList.toggle('hidden', !show);
             if (show) renderCategoryList();
         }
 
@@ -390,6 +432,7 @@
 
         function renderCategoryList() {
             const container = document.getElementById('categoryListContainer');
+            if (!container) return;
             container.innerHTML = '';
             Object.keys(budgetSettings).forEach(cat => {
                 const div = document.createElement('div');
@@ -405,12 +448,17 @@
             renderCategoryList(); updateCategorySelect();
         }
 
-        window.onload = () => {
-            document.getElementById('entryDate').value = new Date().toISOString().split('T')[0];
+        window.addEventListener('DOMContentLoaded', () => {
+            const dateInput = document.getElementById('entryDate');
+            if (dateInput) dateInput.value = new Date().toISOString().split('T')[0];
             updateCategorySelect();
             renderEntries();
             updateSummary();
-        };
+        });
     </script>
+    
+    <!-- 將腳本加載移至 Body 末尾以確保函數已先行定義 -->
+    <script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
+    <script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
 </body>
 </html>
