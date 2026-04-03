@@ -198,93 +198,62 @@
         let budgetSettings = JSON.parse(localStorage.getItem('ghibli_budgets')) || defaultBudgets;
         let entries = JSON.parse(localStorage.getItem('ghibli_entries')) || [];
 
-        // GAPI 初始化
-        function gapiLoaded() {
-            console.log("GAPI 腳本已加載，正在初始化...");
+        // 核心：將初始化函數掛載到全域 Window 物件上，確保加載時能找到
+        window.gapiLoaded = function() {
             gapi.load('client', async () => {
-                try {
-                    await gapi.client.init({ apiKey: API_KEY, discoveryDocs: [DISCOVERY_DOC] });
-                    gapiInited = true;
-                    console.log("GAPI 成功初始化");
-                    checkReady();
-                } catch (e) {
-                    console.error("GAPI 初始化出錯:", e);
-                }
-            });
-        }
-
-        // GIS 初始化
-        function gisLoaded() {
-            console.log("GIS 腳本已加載，正在初始化...");
-            try {
-                tokenClient = google.accounts.oauth2.initTokenClient({
-                    client_id: CLIENT_ID,
-                    scope: SCOPES,
-                    callback: (resp) => handleTokenResponse(resp),
-                    error_callback: (err) => {
-                        console.error("GIS 錯誤回報:", err);
-                        alert("登入過程發生錯誤，請檢查瀏覽器設定。");
-                    }
+                await gapi.client.init({
+                    apiKey: API_KEY,
+                    discoveryDocs: [DISCOVERY_DOC],
                 });
-                gisInited = true;
-                console.log("GIS 成功初始化");
-                checkReady();
-            } catch (e) {
-                console.error("GIS 初始化崩潰:", e);
-                const statusEl = document.getElementById('googleStatus');
-                if (statusEl) statusEl.innerText = "❌ 貓咪連線出錯，請重整頁面";
-            }
-        }
+                gapiInited = true;
+                maybeEnableButtons();
+            });
+        };
 
-        function checkReady() {
+        window.gisLoaded = function() {
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                callback: '', // 在呼叫 requestAccessToken 時定義
+            });
+            gisInited = true;
+            maybeEnableButtons();
+        };
+
+        function maybeEnableButtons() {
             if (gapiInited && gisInited) {
                 const statusEl = document.getElementById('googleStatus');
                 if (statusEl) {
-                    statusEl.innerText = "✅ 貓咪已就緒，可以點擊按鈕連結";
+                    statusEl.innerText = "✅ 貓咪已就緒，可以點擊連結";
                     statusEl.classList.add('text-green-600');
                 }
-                
+                // 檢查是否已有 Token
                 const savedToken = localStorage.getItem('google_access_token');
                 if (savedToken) {
-                    try {
-                        gapi.client.setToken(JSON.parse(savedToken));
-                        updateSigninStatus(true);
-                    } catch(e) {
-                        localStorage.removeItem('google_access_token');
-                    }
+                    gapi.client.setToken(JSON.parse(savedToken));
+                    updateSigninStatus(true);
                 }
             }
         }
 
         function handleAuthClick() {
-            console.log("嘗試發起認證請求...");
-            if (!tokenClient) {
-                alert("正在努力準備中...請再等幾秒後重試！");
-                return;
-            }
-            
-            try {
-                tokenClient.requestAccessToken({ prompt: 'consent' });
-            } catch (e) {
-                console.error("請求 Access Token 失敗:", e);
-                alert("無法開啟登入視窗，請確認是否被瀏覽器攔截彈窗。");
-            }
-        }
+            tokenClient.callback = async (resp) => {
+                if (resp.error !== undefined) throw (resp);
+                localStorage.setItem('google_access_token', JSON.stringify(gapi.client.getToken()));
+                updateSigninStatus(true);
+                await initializeSpreadsheet();
+            };
 
-        function handleTokenResponse(resp) {
-            if (resp.error !== undefined) {
-                console.error("Auth 回應錯誤:", resp);
-                return;
+            if (gapi.client.getToken() === null) {
+                tokenClient.requestAccessToken({prompt: 'consent'});
+            } else {
+                tokenClient.requestAccessToken({prompt: ''});
             }
-            console.log("登入成功，取得 Token");
-            localStorage.setItem('google_access_token', JSON.stringify(gapi.client.getToken()));
-            updateSigninStatus(true);
-            initializeSpreadsheet();
         }
 
         function handleSignoutClick() {
             const token = gapi.client.getToken();
-            if (token) {
+            if (token !== null) {
                 google.accounts.oauth2.revoke(token.access_token);
                 gapi.client.setToken('');
                 localStorage.removeItem('google_access_token');
@@ -318,7 +287,7 @@
                     spreadsheetId, range: 'Sheet1!A1:D1', valueInputOption: 'RAW',
                     resource: { values: [['日期', '項目', '預算', '花費']] }
                 });
-            } catch (err) { console.error("建立試算表失敗", err); }
+            } catch (err) { console.error("建立失敗", err); }
         }
 
         async function syncAllToSheet() {
@@ -340,11 +309,12 @@
                 setTimeout(() => { btn.innerText = originalText; btn.disabled = false; }, 2000);
             } catch (err) {
                 console.error(err);
-                btn.innerText = "同步出錯，請檢查權限";
+                btn.innerText = "同步出錯";
                 btn.disabled = false;
             }
         }
 
+        // --- 記帳邏輯 ---
         function updateCategorySelect() {
             const select = document.getElementById('categorySelect');
             if (!select) return;
@@ -407,11 +377,9 @@
 
         function updateSummary() {
             const total = entries.reduce((s, e) => s + e.expense, 0);
-            const totalExpEl = document.getElementById('totalExpense');
-            const totalRemEl = document.getElementById('totalRemaining');
-            if (totalExpEl) totalExpEl.innerText = `$ ${total}`;
+            document.getElementById('totalExpense').innerText = `$ ${total}`;
             const totalBudget = Object.values(budgetSettings).reduce((s, b) => s + b, 0);
-            if (totalRemEl) totalRemEl.innerText = `$ ${totalBudget - total}`;
+            document.getElementById('totalRemaining').innerText = `$ ${totalBudget - total}`;
         }
 
         function toggleSettings(show) {
@@ -449,15 +417,14 @@
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            const dateInput = document.getElementById('entryDate');
-            if (dateInput) dateInput.value = new Date().toISOString().split('T')[0];
+            document.getElementById('entryDate').value = new Date().toISOString().split('T')[0];
             updateCategorySelect();
             renderEntries();
             updateSummary();
         });
     </script>
     
-    <!-- 將腳本加載移至 Body 末尾以確保函數已先行定義 -->
+    <!-- 確保 onload 指向的函數已定義在 window 上 -->
     <script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
     <script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
 </body>
